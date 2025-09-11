@@ -1,6 +1,7 @@
 package com.boot.swlugweb.v1.blog;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import lombok.Setter;
 import java.time.LocalDateTime;
@@ -14,6 +15,7 @@ public class BlogDto {
     private Integer boardCategory;
     private String boardTitle;
     private LocalDateTime createAt;
+    private LocalDateTime updateAt;
     @JsonIgnore
     private String userId;
     private String nickname;
@@ -29,7 +31,7 @@ public class BlogDto {
     private String thumbnailImage; // 필드는 유지
 
     public String getThumbnailUrl() {
-        if (image != null && !image.isEmpty()) {
+        if (image != null && !image.isEmpty() && image.get(0) != null) {
             String firstImage = image.get(0);
             return firstImage.startsWith("/api/blog/images/")
                     ? firstImage
@@ -37,4 +39,5 @@ public class BlogDto {
         }
         return "/img/apply_swlug.png";
     }
+
 }

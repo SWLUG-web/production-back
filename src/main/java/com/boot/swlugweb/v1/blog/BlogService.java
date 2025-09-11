@@ -9,101 +9,51 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
+
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+import static com.google.common.io.Files.getFileExtension;
+
 @Service
 public class BlogService {
 
-    @Value("${file.upload-dir}")
-    private String uploadDir;
+//    @Value("${file.upload-dir}")
+//    private String uploadDir;
 
     private final BlogRepository blogRepository;
     private final MyPageRepository myPageRepository;
+    private final GoogleDriveService googleDriveService;
 
-    public BlogService(BlogRepository blogRepository, MyPageRepository myPageRepository) {
+    public BlogService(BlogRepository blogRepository, MyPageRepository myPageRepository,GoogleDriveService googleDriveService) {
         this.blogRepository = blogRepository;
         this.myPageRepository = myPageRepository;
+        this.googleDriveService = googleDriveService;
     }
+    public String saveImage(MultipartFile file) throws Exception {
+        if (file == null || file.isEmpty()) throw new IllegalArgumentException("Empty file");
 
-    // BlogService.java
-    public String saveImage(MultipartFile file) throws IOException {
-        try {
-            // 파일 유효성 검사
-            if (file.isEmpty()) {
-                throw new IllegalArgumentException("Empty file");
-            }
+        if (file.getSize() > 20 * 1024 * 1024) // 20MB 제한
+            throw new IllegalArgumentException("File size exceeds maximum limit");
 
-            // 파일 크기 검사 (10MB)
-            if (file.getSize() > 20 * 1024 * 1024) {
-                throw new IllegalArgumentException("File size exceeds maximum limit");
-            }
+        String originalFilename = StringUtils.cleanPath(file.getOriginalFilename());
+        String extension = getFileExtension(originalFilename).toLowerCase();
 
-            // 파일 확장자 검사
-            String originalFilename = StringUtils.cleanPath(file.getOriginalFilename());
-            String extension = getFileExtension(originalFilename).toLowerCase();
-            Set<String> allowedExtensions = new HashSet<>(Arrays.asList(
-                    "jpg", "jpeg", "png", "gif", "bmp", "webp", "heic", "heif", "tiff", "tif", "svg"
-            ));
+        Set<String> allowedExtensions = Set.of(
+                "jpg", "jpeg", "png", "gif", "bmp", "webp", "heic", "heif", "tiff", "tif", "svg"
+        );
 
-            if (!allowedExtensions.contains(extension)) {
-                throw new IllegalArgumentException("Invalid file extension");
-            }
-
-            // 고유한 파일명 생성
-            String newFilename = UUID.randomUUID().toString() + "." + extension;
-            Path uploadPath = Paths.get(uploadDir);
-
-            // 업로드 디렉토리가 없으면 생성
-            if (!Files.exists(uploadPath)) {
-                Files.createDirectories(uploadPath);
-                System.out.println("Created upload directory: " + uploadPath.toAbsolutePath());
-            }
-
-            // 파일 저장
-            Path destinationFile = uploadPath.resolve(newFilename);
-            Files.copy(file.getInputStream(), destinationFile, StandardCopyOption.REPLACE_EXISTING);
-            System.out.println("File saved at: " + destinationFile.toAbsolutePath());
-
-            // 접근 가능한 URL 반환
-            return "/api/blog/images/" + newFilename;
-        } catch (IOException e) {
-            System.err.println("Error saving file: " + e.getMessage());
-            e.printStackTrace();
-            throw e;
+        if (!allowedExtensions.contains(extension)) {
+            throw new IllegalArgumentException("Invalid file extension: " + extension);
         }
+
+        return googleDriveService.uploadFileToDrive(file);
     }
 
-    // 파일 확장자 추출 메서드
-    private String getFileExtension(String filename) {
-        int lastDotIndex = filename.lastIndexOf('.');
-        if (lastDotIndex > 0) {
-            return filename.substring(lastDotIndex + 1);
-        }
-        return "";
-    }
-    // 이미지 삭제 메소드
-    public void deleteImage(String imageUrl) {
-        if (imageUrl != null && imageUrl.startsWith("/api/blog/images/")) {
-            String filename = imageUrl.substring("/api/blog/images/".length());
-            try {
-                Path imagePath = Paths.get(uploadDir).resolve(filename);
-                Files.deleteIfExists(imagePath);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-    }
-
-    public BlogDomain createBlog(BlogCreateDto blogCreateDto, String userId) throws IOException {
+    public BlogDomain createBlog(BlogCreateDto blogCreateDto, String userId) throws Exception {
         BlogDomain blogDomain = new BlogDomain();
 
         blogDomain.setUserId(userId);
@@ -111,83 +61,127 @@ public class BlogService {
         blogDomain.setBoardTitle(blogCreateDto.getBoardTitle());
         blogDomain.setBoardContents(blogCreateDto.getBoardContent());
         blogDomain.setCreateAt(LocalDateTime.now());
+        blogDomain.setUpdateAt(LocalDateTime.now());
         blogDomain.setTag(blogCreateDto.getTag());
         blogDomain.setIsPin(false);
         blogDomain.setIsSecure(0);
         blogDomain.setIsDelete(0);
 
         List<String> uploadedImageUrls = new ArrayList<>();
-        if (blogCreateDto.getImageFiles() != null && !blogCreateDto.getImageFiles().isEmpty()) {
-            for (MultipartFile file : blogCreateDto.getImageFiles()) {
-                try {
-                    String imageUrl = saveImage(file);
-                    uploadedImageUrls.add(imageUrl);
-                } catch (Exception e) {
-                    uploadedImageUrls.forEach(this::deleteImage);
-                    throw e;
+
+        try {
+            // 1️⃣ 업로드된 이미지 파일 처리 (saveImage 사용)
+            if (blogCreateDto.getImageFiles() != null) {
+                for (MultipartFile file : blogCreateDto.getImageFiles()) {
+                    uploadedImageUrls.add(saveImage(file));
                 }
             }
-        }
 
-        // HTML 컨텐츠에서 이미지 URL 추출
-        Pattern pattern = Pattern.compile("src=\"(/api/blog/images/[^\"]+)\"");
-        Matcher matcher = pattern.matcher(blogCreateDto.getBoardContent());
-        while (matcher.find()) {
-            String imageUrl = matcher.group(1);
-            if (!uploadedImageUrls.contains(imageUrl)) {
-                uploadedImageUrls.add(imageUrl);
+            // 2️⃣ 본문 HTML에 포함된 이미지 URL도 추출해서 저장
+            Pattern pattern = Pattern.compile("src=[\"']([^\"']+)[\"']");
+            Matcher matcher = pattern.matcher(blogCreateDto.getBoardContent());
+
+            while (matcher.find()) {
+                String imageUrl = matcher.group(1);
+                if (!uploadedImageUrls.contains(imageUrl)) {
+                    uploadedImageUrls.add(imageUrl);
+                }
             }
+
+        } catch (Exception e) {
+            // 업로드한 이미지 모두 삭제
+            uploadedImageUrls.forEach(this::deleteImage);
+            throw e;
         }
 
         blogDomain.setImage(uploadedImageUrls);
-        return blogRepository.save(blogDomain);
 
+
+        return blogRepository.save(blogDomain);
     }
 
-    public void updateBlog(BlogUpdateRequestDto blogUpdateRequestDto, String userId) throws IOException {
-        BlogDomain blog = blogRepository.findById(blogUpdateRequestDto.getId())
+
+    private void deleteImage(String imageUrl) {
+        try {
+            String fileId = extractFileIdFromUrl(imageUrl); // 🔍 fileId 추출
+            googleDriveService.deleteFile(fileId);
+            System.out.println("🗑️ Deleted fileId: " + fileId);
+        } catch (Exception e) {
+            System.err.println("❌ Failed to delete image: " + imageUrl);
+            e.printStackTrace();
+        }
+    }
+
+
+    // ✅ URL에서 fileId 추출
+    public String extractFileIdFromUrl(String url) {
+        if (url == null) return null;
+
+        // 1. drive.google.com 링크
+        if (url.contains("drive.google.com/file/d/")) {
+            int start = url.indexOf("/d/") + 3;
+            int end = url.indexOf("/", start);
+            if (start > 2 && end > start) {
+                return url.substring(start, end);
+            }
+        }
+
+        // 2. lh3.googleusercontent.com 링크
+        if (url.contains("lh3.googleusercontent.com/d/")) {
+            int start = url.indexOf("/d/") + 3;
+            int end = url.indexOf("?", start); // 쿼리 파라미터 제거 (optional)
+            if (end == -1) end = url.length(); // ?가 없는 경우
+            return url.substring(start, end);
+        }
+
+        // 3. https://drive.google.com/uc?id=FILE_ID
+        Pattern pattern = Pattern.compile("id=([^&]+)");
+        Matcher matcher = pattern.matcher(url);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
+    }
+
+
+
+    public void updateBlog(BlogUpdateRequestDto dto, String userId) throws Exception {
+        BlogDomain blog = blogRepository.findById(dto.getId())
                 .orElseThrow(() -> new IllegalArgumentException("Blog not found"));
 
         if (!blog.getUserId().equals(userId)) {
             throw new SecurityException("Not authorized");
         }
+        // 제목, 내용, 태그 수정
+        if (dto.getBoardTitle() != null) blog.setBoardTitle(dto.getBoardTitle());
+        if (dto.getBoardContent() != null) blog.setBoardContents(dto.getBoardContent());
+        if (dto.getTag() != null) blog.setTag(dto.getTag());
 
-        if (blogUpdateRequestDto.getBoardTitle() != null) {
-            blog.setBoardTitle(blogUpdateRequestDto.getBoardTitle());
-        }
-        if (blogUpdateRequestDto.getBoardContent() != null) {
-            blog.setBoardContents(blogUpdateRequestDto.getBoardContent());
-        }
-        if (blogUpdateRequestDto.getTag() != null) {
-            blog.setTag(blogUpdateRequestDto.getTag());
-        }
-
+        // 기존 이미지 목록
         List<String> currentImageUrls = blog.getImage() != null ? new ArrayList<>(blog.getImage()) : new ArrayList<>();
-        List<String> updatedImageUrls = blogUpdateRequestDto.getImageUrls() != null ?
-                blogUpdateRequestDto.getImageUrls() : new ArrayList<>();
+        List<String> updatedImageUrls = dto.getImageUrls() != null ? new ArrayList<>(dto.getImageUrls()) : new ArrayList<>();
 
+        // 삭제 대상 이미지 계산
         List<String> imagesToDelete = new ArrayList<>(currentImageUrls);
         imagesToDelete.removeAll(updatedImageUrls);
+
         for (String imageUrl : imagesToDelete) {
-            deleteImage(imageUrl);
+            deleteImage(imageUrl); // Google Drive에서 삭제
         }
 
-        if (blogUpdateRequestDto.getImageFiles() != null) {
-            for (MultipartFile file : blogUpdateRequestDto.getImageFiles()) {
-                try {
-                    String imageUrl = saveImage(file);
-                    updatedImageUrls.add(imageUrl);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                    throw e;
-                }
+        // 새로 추가할 이미지 업로드
+        if (dto.getImageFiles() != null && !dto.getImageFiles().isEmpty()) {
+            for (MultipartFile file : dto.getImageFiles()) {
+                String imageUrl = saveImage(file); // 업로드 후 URL 반환
+                updatedImageUrls.add(imageUrl);
             }
         }
 
         blog.setImage(updatedImageUrls);
-        blog.setCreateAt(LocalDateTime.now());
+        blog.setUpdateAt(LocalDateTime.now());
         blogRepository.save(blog);
     }
+
 
     public void deleteBlog(BlogDeleteRequestDto blogDeleteRequestDto, String userId) {
         BlogDomain blog = blogRepository.findById(blogDeleteRequestDto.getId())
@@ -288,6 +282,7 @@ public class BlogService {
         blogDetailResponseDto.setBoardContents(blog.getBoardContents());
         blogDetailResponseDto.setNickname(nickname);
         blogDetailResponseDto.setCreateAt(blog.getCreateAt());
+        blogDetailResponseDto.setUpdateAt(blog.getUpdateAt());
         blogDetailResponseDto.setTag(blog.getTag());
         blogDetailResponseDto.setImage(blog.getImage());
         blogDetailResponseDto.setThumbnailImage(blog.getThumbnailImage());
@@ -335,4 +330,13 @@ public class BlogService {
     public List<String> getAllTags() {
         return blogRepository.findAllTags();
     }
+
+    //구글 코드
+    public List<String> getImageUrlsByBlogId(String blogId) {
+        return blogRepository.findById(blogId)
+                .map(BlogDomain::getImage)
+                .orElse(Collections.emptyList());
+    }
+
+
 }
